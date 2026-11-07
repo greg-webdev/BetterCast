@@ -402,7 +402,6 @@
     <!-- Idle Splash -->
     <div class="splash" id="splashScreen">
       <div class="splash-title">No Stream</div>
-      </div>
     </div>
   </main>
 
@@ -448,17 +447,27 @@
     let controlsVisible = true;
     let isScanning = false;
 
-    // Metrics
-    let frameCount = 0;
+    // Stream Metrics
     let byteCount = 0;
-    let lastFpsTime = performance.now();
     let currentMode = "balanced";
     let currentQuality = "-";
     let senderName = "-";
     let currentBitrateChoice = "auto";
 
+    // ==========================================
+    // 60 FPS Steady Delayed Jitter Buffer
+    // Buffers frames for rock-solid 60.0 FPS playback
+    // ==========================================
+    const frameQueue = [];
+    let isBuffering = true;
+    const TARGET_BUFFER_FRAMES = 60; // 1 second steady jitter buffer for locked 60 FPS
+    const TARGET_FRAME_MS = 1000 / 60; // ~16.667ms per frame
+    let lastDrawTime = 0;
+    let renderedCount = 0;
+    let lastStatsTime = performance.now();
+
     window.addEventListener('load', () => {
-      const savedTarget = localStorage.getItem('screencast_vidaa_target');
+      const savedTarget = localStorage.getItem('screencast_target') || localStorage.getItem('screencast_vidaa_target');
       const urlParams = new URLSearchParams(window.location.search);
       const hostParam = urlParams.get('host') || urlParams.get('ip');
 
@@ -624,6 +633,7 @@
           setStatus('disconnected', 'Target required');
           return;
         }
+        localStorage.setItem('screencast_target', target);
         localStorage.setItem('screencast_vidaa_target', target);
         connect(target);
       }
@@ -644,13 +654,14 @@
 
         ws.onopen = () => {
           isConnected = true;
+          isBuffering = true;
           btnConnect.textContent = 'Disconnect';
           btnConnect.className = 'btn btn-disconnect';
           setStatus('connecting', 'Waiting for host to accept...');
 
           const req = {
             type: "REQUEST_JOIN",
-            client_name: "Smart TV"
+            client_name: "Web Receiver"
           };
           try { ws.send(JSON.stringify(req)); } catch (e) {}
         };
@@ -680,7 +691,7 @@
     function handleJsonMessage(msg) {
       if (msg.type === "WAITING_ACCEPT") {
         setStatus('connecting', 'Waiting for host to accept...');
-      } else if (msg.type === "ACCEPTED" || msg.cmd === "INIT") {
+      } else if (msg.type === "ACCEPTED" || msg.cmd === "INIT" || msg.type === "UPDATE_CONFIG") {
         handleConfigMessage(msg);
       } else if (msg.type === "REJECTED") {
         setStatus('disconnected', msg.reason || 'Declined by host');
@@ -705,6 +716,13 @@
       splash.classList.remove('hidden');
       valFps.textContent = '0.0';
       valBitrate.textContent = '0 kbps';
+
+      // Clear frame queue
+      while (frameQueue.length > 0) {
+        const f = frameQueue.shift();
+        if (f && f.close) f.close();
+      }
+      isBuffering = true;
     }
 
     function setStatus(state, text) {
@@ -732,8 +750,21 @@
       valMode.textContent = currentMode.toUpperCase();
       valQuality.textContent = currentQuality;
 
-      setStatus('live', `Live: ${senderName} (60 FPS)`);
-      splash.classList.add('hidden');
+      // Update bitrate selector if sender sent updated bitrate
+      if (cfg.bitrate) {
+        document.querySelectorAll('.btn-bitrate').forEach(b => {
+          b.classList.remove('active');
+          if (b.textContent.toLowerCase() === cfg.bitrate.toLowerCase()) {
+            b.classList.add('active');
+          }
+        });
+      }
+
+      if (isBuffering && frameQueue.length < TARGET_BUFFER_FRAMES) {
+        setStatus('connecting', `Buffering stream...`);
+      } else {
+        setStatus('live', `Live: ${senderName} (60 FPS)`);
+      }
 
       // Send selected bitrate preference on handshake
       if (currentBitrateChoice && currentBitrateChoice !== 'auto' && ws) {
@@ -743,20 +774,11 @@
       }
     }
 
+    // ==========================================
+    // Frame Ingestion (Queued for Paced 60 FPS)
+    // ==========================================
     function handleFramePacket(buffer) {
       byteCount += buffer.byteLength;
-      frameCount++;
-
-      const now = performance.now();
-      if (now - lastFpsTime >= 1000) {
-        const fps = (frameCount * 1000) / (now - lastFpsTime);
-        const kbps = (byteCount * 8) / ((now - lastFpsTime) * 1.024);
-        valFps.textContent = fps.toFixed(1);
-        valBitrate.textContent = kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mbps' : Math.round(kbps) + ' kbps';
-        frameCount = 0;
-        byteCount = 0;
-        lastFpsTime = now;
-      }
 
       let jpegBuffer = buffer;
       if (buffer.byteLength >= 13) {
@@ -781,37 +803,92 @@
 
       const blob = new Blob([jpegBuffer], { type: 'image/jpeg' });
 
-      // Hardware-accelerated GPU bitmap decoding for 60 FPS
+      // Hardware GPU bitmap decoding off main thread
       if (window.createImageBitmap) {
         createImageBitmap(blob).then(bmp => {
-          if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
-            canvas.width = bmp.width;
-            canvas.height = bmp.height;
-            splash.classList.add('hidden');
-            if (statusText.textContent.indexOf('Live') === -1) {
-              setStatus('live', `Live Stream (60 FPS)`);
-            }
+          frameQueue.push(bmp);
+          // Bound buffer to max 180 frames (~3 sec) to prevent unbounded memory
+          if (frameQueue.length > 180) {
+            const dropped = frameQueue.shift();
+            if (dropped && dropped.close) dropped.close();
           }
-          ctx.drawImage(bmp, 0, 0);
-          bmp.close();
         }).catch(() => {});
       } else {
         const img = new Image();
         img.onload = () => {
-          if (canvas.width !== img.width || canvas.height !== img.height) {
-            canvas.width = img.width;
-            canvas.height = img.height;
-            splash.classList.add('hidden');
-            if (statusText.textContent.indexOf('Live') === -1) {
-              setStatus('live', `Live Stream (60 FPS)`);
-            }
+          frameQueue.push(img);
+          if (frameQueue.length > 180) {
+            const dropped = frameQueue.shift();
+            if (dropped && dropped.src) URL.revokeObjectURL(dropped.src);
           }
-          ctx.drawImage(img, 0, 0);
-          URL.revokeObjectURL(img.src);
         };
         img.src = URL.createObjectURL(blob);
       }
     }
+
+    // ==========================================
+    // Render Loop (Locked 60 FPS Pacing)
+    // ==========================================
+    function renderLoop(timestamp) {
+      requestAnimationFrame(renderLoop);
+
+      // Network / Bitrate & Rendered FPS Calculation
+      if (timestamp - lastStatsTime >= 1000) {
+        const kbps = (byteCount * 8) / ((timestamp - lastStatsTime) * 1.024);
+        valBitrate.textContent = kbps >= 1000 ? (kbps / 1000).toFixed(1) + ' Mbps' : Math.round(kbps) + ' kbps';
+        byteCount = 0;
+
+        const renderedFps = (renderedCount * 1000) / (timestamp - lastStatsTime);
+        valFps.textContent = renderedFps.toFixed(1);
+        renderedCount = 0;
+        lastStatsTime = timestamp;
+      }
+
+      if (!isConnected) {
+        return;
+      }
+
+      // Pre-buffering phase: ensures steady uninterrupted 60 FPS playback
+      if (isBuffering) {
+        if (frameQueue.length >= TARGET_BUFFER_FRAMES) {
+          isBuffering = false;
+          splash.classList.add('hidden');
+          setStatus('live', `Live: ${senderName} (60 FPS)`);
+        } else {
+          if (frameQueue.length > 0) {
+            setStatus('connecting', `Buffering (${frameQueue.length}/${TARGET_BUFFER_FRAMES})...`);
+          }
+          return;
+        }
+      }
+
+      // Paced steady 60.0 FPS clock
+      const elapsed = timestamp - lastDrawTime;
+      if (elapsed >= TARGET_FRAME_MS - 2) {
+        if (frameQueue.length > 0) {
+          const frame = frameQueue.shift();
+          const fw = frame.width;
+          const fh = frame.height;
+          if (canvas.width !== fw || canvas.height !== fh) {
+            canvas.width = fw;
+            canvas.height = fh;
+          }
+          ctx.drawImage(frame, 0, 0);
+
+          if (frame.close) {
+            frame.close();
+          } else if (frame.src) {
+            URL.revokeObjectURL(frame.src);
+          }
+
+          renderedCount++;
+          lastDrawTime = timestamp;
+          splash.classList.add('hidden');
+        }
+      }
+    }
+
+    requestAnimationFrame(renderLoop);
 
     function toggleFullscreen() {
       if (!document.fullscreenElement) {
