@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>BettercastV1.1</title>
+  <title>BetterCast</title>
   <style>
     * {
       box-sizing: border-box;
@@ -95,6 +95,29 @@
     .input-group input:focus, .input-group input.tv-focused {
       background: #1e1e24;
       border-color: #40404a;
+    }
+
+    /* Bitrate Segmented Controls (Inline, No floating window) */
+    .bitrate-selector {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding-left: 6px;
+      border-left: 1px solid #2a2a2e;
+    }
+    .bitrate-label {
+      font-size: 11px;
+      color: #606068;
+      margin-right: 4px;
+    }
+    .btn-bitrate {
+      color: #72727a;
+      padding: 4px 6px;
+      font-size: 12px;
+    }
+    .btn-bitrate.active {
+      color: #ffffff;
+      font-weight: 600;
     }
 
     /* Text buttons: Sleek, small, no outer ring, pure text turning whiter from grey */
@@ -337,6 +360,17 @@
       </div>
       <button class="btn" id="btnScan" onclick="toggleScanPanel()">Scan</button>
       <button class="btn" id="btnConnect" onclick="toggleConnection()">Connect</button>
+
+      <!-- Adjustable Bitrate Buttons -->
+      <div class="bitrate-selector">
+        <span class="bitrate-label">Bitrate:</span>
+        <button class="btn btn-bitrate active" onclick="setBitrate('auto')">Auto</button>
+        <button class="btn btn-bitrate" onclick="setBitrate('6M')">6M</button>
+        <button class="btn btn-bitrate" onclick="setBitrate('12M')">12M</button>
+        <button class="btn btn-bitrate" onclick="setBitrate('20M')">20M</button>
+        <button class="btn btn-bitrate" onclick="setBitrate('35M')">35M</button>
+      </div>
+
       <button class="btn" onclick="toggleFullscreen()">Fullscreen</button>
       <button class="btn" onclick="toggleControls()">Hide Bar</button>
     </div>
@@ -367,7 +401,8 @@
 
     <!-- Idle Splash -->
     <div class="splash" id="splashScreen">
-      <div class="splash-title">BetterCast</div>
+      <div class="splash-title">No Stream</div>
+      </div>
     </div>
   </main>
 
@@ -420,6 +455,7 @@
     let currentMode = "balanced";
     let currentQuality = "-";
     let senderName = "-";
+    let currentBitrateChoice = "auto";
 
     window.addEventListener('load', () => {
       const savedTarget = localStorage.getItem('screencast_vidaa_target');
@@ -442,6 +478,29 @@
         }
       }
     });
+
+    // ==========================================
+    // Real-Time Bitrate Control
+    // ==========================================
+    function setBitrate(val) {
+      currentBitrateChoice = val;
+      document.querySelectorAll('.btn-bitrate').forEach(b => {
+        b.classList.remove('active');
+        if (b.textContent.toLowerCase() === val.toLowerCase()) {
+          b.classList.add('active');
+        }
+      });
+
+      if (ws && isConnected) {
+        try {
+          ws.send(JSON.stringify({ type: "SET_BITRATE", bitrate: val }));
+        } catch (e) {}
+      }
+
+      if (window.vidaaController) {
+        window.vidaaController.refreshFocusables();
+      }
+    }
 
     // ==========================================
     // Scan Functionality (Inline Panel)
@@ -673,8 +732,15 @@
       valMode.textContent = currentMode.toUpperCase();
       valQuality.textContent = currentQuality;
 
-      setStatus('live', `Live: ${senderName}`);
+      setStatus('live', `Live: ${senderName} (60 FPS)`);
       splash.classList.add('hidden');
+
+      // Send selected bitrate preference on handshake
+      if (currentBitrateChoice && currentBitrateChoice !== 'auto' && ws) {
+        try {
+          ws.send(JSON.stringify({ type: "SET_BITRATE", bitrate: currentBitrateChoice }));
+        } catch (e) {}
+      }
     }
 
     function handleFramePacket(buffer) {
@@ -714,20 +780,37 @@
       }
 
       const blob = new Blob([jpegBuffer], { type: 'image/jpeg' });
-      const img = new Image();
-      img.onload = () => {
-        if (canvas.width !== img.width || canvas.height !== img.height) {
-          canvas.width = img.width;
-          canvas.height = img.height;
-          splash.classList.add('hidden');
-          if (statusText.textContent.indexOf('Live') === -1) {
-            setStatus('live', 'Live Stream');
+
+      // Hardware-accelerated GPU bitmap decoding for 60 FPS
+      if (window.createImageBitmap) {
+        createImageBitmap(blob).then(bmp => {
+          if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+            canvas.width = bmp.width;
+            canvas.height = bmp.height;
+            splash.classList.add('hidden');
+            if (statusText.textContent.indexOf('Live') === -1) {
+              setStatus('live', `Live Stream (60 FPS)`);
+            }
           }
-        }
-        ctx.drawImage(img, 0, 0);
-        URL.revokeObjectURL(img.src);
-      };
-      img.src = URL.createObjectURL(blob);
+          ctx.drawImage(bmp, 0, 0);
+          bmp.close();
+        }).catch(() => {});
+      } else {
+        const img = new Image();
+        img.onload = () => {
+          if (canvas.width !== img.width || canvas.height !== img.height) {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            splash.classList.add('hidden');
+            if (statusText.textContent.indexOf('Live') === -1) {
+              setStatus('live', `Live Stream (60 FPS)`);
+            }
+          }
+          ctx.drawImage(img, 0, 0);
+          URL.revokeObjectURL(img.src);
+        };
+        img.src = URL.createObjectURL(blob);
+      }
     }
 
     function toggleFullscreen() {
