@@ -328,7 +328,7 @@
   <!-- Top Navigation & Connection Bar -->
   <header id="headerBar">
     <div class="brand">
-      <span class="brand-title">ScreenCast VIDAA TV</span>
+      <span class="brand-title">BetterCast</span>
     </div>
 
     <div class="controls">
@@ -367,16 +367,7 @@
 
     <!-- Idle Splash -->
     <div class="splash" id="splashScreen">
-      <div class="splash-title">VIDAA OS Ready</div>
-      <div class="splash-sub">
-        Start streaming from your PC or Phone app, select Scan on your TV remote to connect, and accept from the app.
-      </div>
-      <div class="splash-tags">
-        <span class="tag">D-Pad Remote Ready</span>
-        <span class="tag">SuperSmooth 60 FPS</span>
-        <span class="tag">LowLatency</span>
-        <span class="tag">4K UHD</span>
-      </div>
+      <div class="splash-title">BetterCast</div>
     </div>
   </main>
 
@@ -600,7 +591,7 @@
 
           const req = {
             type: "REQUEST_JOIN",
-            client_name: "Smart TV (VIDAA OS)"
+            client_name: "Smart TV"
           };
           try { ws.send(JSON.stringify(req)); } catch (e) {}
         };
